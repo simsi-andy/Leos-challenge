@@ -1,0 +1,277 @@
+from flask import Flask, render_template_string, request, redirect, url_for, flash, g, session
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, SubmitField, URLField, BooleanField, DateField, SelectField, validators
+from wtforms.validators import InputRequired, Length, EqualTo, DataRequired, Email, Regexp, ValidationError
+import os, secrets, datetime
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///synlink.db'  # Change this to your database URI
+db = SQLAlchemy(app)
+login_manager = LoginManager()
+login_manager.init_app(app)
+
+class User(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), index=True, unique=True, nullable=False)
+    email = db.Column(db.String(120), index=True, unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    confirmed_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+class Link(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    original_url = db.Column(db.Text, nullable=False)
+    slug = db.Column(db.String(64), index=True, unique=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=True)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+
+class RegistrationForm(FlaskForm):
+    username = StringField('Username', validators=[InputRequired(), Length(min=3, max=64), Regexp(r'[A-Za-z0-9_.-]+$', message='Username must contain only letters, numbers, underscores, periods and dashes')])
+    email = StringField('Email', validators=[InputRequired(), Email()])
+    password = PasswordField('Password', validators=[InputRequired(), Length(min=8)])
+    confirm_password =PasswordField('Confirm Password', validators=[InputRequired(), EqualTo('password')])
+
+class LoginForm(FlaskForm):
+    username = StringField('Username', validators=[InputRequired()])
+    password = PasswordField('Password', validators=[InputRequired()])
+
+class LinkForm(FlaskForm):
+    original_url = URLField('Original URL', validators=[InputRequired([URLField.scheme_message_required])])
+    custom_slug = StringField('Custom Slug (optional)')  # Should be made not required for anon users
+    expires_at = SelectField('Expires In', choices=[(i, f'{i} days') for i in range(1, 91)] + [(90, 'Never')], coerce=int)
+
+class EditLinkForm(FlaskForm):
+    original_url = URLField('Original URL', validators=[InputRequired([URLField.scheme_message_required])])
+    custom_slug = StringField('Custom Slug (optional)')
+    expires_at = SelectField('Expires In', choices=[(i, f'{i} days') for i in range(1, 91)] + [(90, 'Never')], coerce=int)
+    is_active = BooleanField('Active')
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+@app.route('/')
+def index():
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synlink - Shorten Your Links</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/css/bootstrap.min.css" integrity="sha384-FJ7QT6wW+SkL1C4UyY0mpH3/AMOyRr7j/KQkxhXv9b/w==" crossorigin="anonymous">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+            background-color: #f0f2f5;
+            padding-top: 3rem;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg fixed-top bg-white shadow-sm">
+        <div class="container">
+            <a class="navbar-brand" href="/"><img src="" alt="Synlink Logo" width="24" height="24"> Synlink</a>
+            <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarSupportedContent">
+                <ul class="navbar-nav ml-auto">
+                    {% if g.user %}
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('logout') }}">Logout</a></li>
+                    {% else %}
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('register') }}">Register</a></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">Login</a></li>
+                    {% endif %}
+                </ul>
+            </div>
+        </div>
+    </nav>
+    <main class="container">
+        <h1 class="display-4">Shorten Your Links With Synlink</h1>
+        <p class="lead">Share your links, track your clicks and more with our free link shortening service.</p>
+        {% with message = get_flashed_messages() %}
+            {% for msg in message %}
+                <div class="alert alert-{{ 'success' if 'success' in msg else 'danger'}}">{{ msg }}</div>
+            {% endwith %}
+        <form action="{{ url_for('create_link') }}" method="POST">
+            {{ form.hidden_tag() }}
+            <div class="form-group">
+                <label for="original_url">Original URL</label>
+                {{ form.original_url(placeholder=True, autofocus=True) }}
+            </div>
+            {% if form.custom_slug %}
+                <div class="form-group">
+                    <label for="custom_slug">Custom Slug (optional)</label>
+                    {{ form.custom_slug(placeholder=True) }}
+                </div>
+            {% endif %}
+            <button type="submit" class="btn btn-primary">Shorten</button>
+        </form>
+    </main>
+    <footer class="container">
+        <p>&copy; 2023 Synlink. All rights reserved.</p>
+    </footer>
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js" integrity="sha384-D7mM37q+D0sL89jQz+jP4Hf/AbrRlfxK4Ammg==" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.min.js" integrity="sha384-7vAGSyoF/jLrEaCH18iKRVyTGe/R/9YR" crossorigin="anonymous"></script>
+</body>
+</html>
+''', title='Synlink - Shorten Your Links')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if g.user:
+        return redirect(url_for('dashboard'))
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(username=form.username.data).first()
+        if user:
+            flash('Username already taken.', 'danger')
+            return render_template_string('''
+                <!-- Register Form -->
+                ''', title='Register - Synlink', form=form)
+        user = User.query.filter_by(email=form.email.data).first()
+        if user:
+            flash('Email address already in use.', 'danger')
+            return render_template_string('''
+                <!-- Register Form -->
+                ''', title='Register - Synlink', form=form)
+        user = User(username=form.username.data, email=form.email.data)
+        user.set_password(form.password.data)
+        db.session.add(user)
+        db.session.commit()
+        flash('Thanks for registering! Please check your email for a confirmation link.', 'success')
+        return redirect(url_for('login'))
+    return render_template_string('''
+                <!-- Register Form -->
+                ''', title='Register - Synlink', form=form)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if g.user:
+        return redirect(url_for('dashboard'))
+    form = LoginForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(username=form.username.data).first()
+        if not user or not user.check_password(form.password.data):
+            flash('Invalid username or password.', 'danger')
+            return render_template_string('''
+                <!-- Login Form -->
+                ''', title='Login - Synlink', form=form)
+        login_user(user, remember=True)
+        return redirect(url_for('dashboard'))
+    return Render_template_string('''
+                <!-- Login Form -->
+                ''', title='Login - Synlink', form=form)
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash('You have been logged out.', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/dashboard')
+@login_REQUIRED
+def dashboard():
+    links = current_user.links.order_by(Link.created_at.desc()).all()
+    return render_template_string('''
+                <!-- Dashboard -->
+                ''', title='Dashboard - Synlink', links=links)
+
+@app.route('/create-link', methods=['GET', 'POST'])
+@login_REQUIRED
+def create_link():
+    if request.method == 'POST':
+        form = LinkForm()
+        if form.validate_on_submit():
+            link = Link(original_url=form.originalUrl.data, user_id=current_user.id)
+            if form.custom_slug.data:
+                slug = Link.query.filter_by(slug=form.customSlug.data).first()
+                if slug:
+                    flash('Custom slug already taken.', 'danger')
+                    return render_template_string('''
+                        <!-- Create Link Form -->
+                        ''', title='Create Link - Synlink', form=form)
+                link.slug = form.CustomSlug.data
+            else:
+                link.slug = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(6))
+            if form.expires_at.data == 90:
+                link.expiresAt = None
+            else:
+                link.expiresAt = datetime.datetime.utcnow() + datetime.timedelta(days=form.expiresAt.data)
+            db.session.add(link)
+            db.session.commit()
+            flash('Link created successfully!', 'success')
+            return redirect(url_for('dashboard'))
+    else:
+        form = LinkForm()
+    return Render_template_string('''
+                <!-- Create Link Form -->
+                ''', title='Create Link - Synlink', form=form)
+
+@app.route('/<string:slug>')
+def redirect_to_link(slug):
+    link = Link.query.filter_by(slug=slug).first_or_404()
+    if not link.isActive:
+        flash('This link has been suspended by the owner.', 'danger')
+        return render_template_string('''
+                <!-- Suspended Link Notice -->
+                ''', title='Suspended - Synlink')
+    return redirect(link.originalUrl)
+
+@app.route('/edit-link/<int:link_id>', methods=['GET', 'POST'])
+@login_REQUIRED
+def edit_link(link_id):
+    link = Link.query.filter_by(id=link_id, user_id=current_user.id).first_or_404()
+    if request.method == 'POST':
+        form = EditLinkForm()
+        if form.validate_on_submit():
+            link.originalUrl = form.originalUrl.data
+            if form.customSlug.data:
+                slug = Link.query.filter_by(slug=form.CustomSlug.data).first();
+                if slug and slug.id != link_id:
+                    flash('Custom slug already taken.', 'danger')
+                    return Render_template_string('''
+                        <!-- Edit Link Form -->
+                        ''', title='Edit Link- Synlink', form=form, link=link)
+            else:
+                link.Slug = form.CustomSlug.data
+            if form.expiresAt.data == 90:
+                link ExpiresAt = None
+            else:
+                link ExpiresAt = datetime.datetime.utcnow() + datetime.timedelta(days=form.expiresAt.data);
+            link.IsActive = form.IsActive.data;
+            db.session.commit();
+            flash('Link edited successfully!', 'success');
+            return redirect(url_for('dashboard'));
+    else:
+        form = EditLinkForm(obj=link)
+    return Render_template_string('''
+                <!-- Edit Link Form -->
+                ''', title='Edit Link- Synlink', form=form, link=link)
+
+@app.route('/delete-link/<int:link_id>', methods=['POST'])
+@login_REQUIRED
+def delete_Link(link_id):
+    link = Link.query.filter_by(id=linkId, userId=currentUser.id).first_or_404()
+    db.session.delete(link)
+    db.session.commit()
+    flash('Link deleted successfully!', 'success')
+    return Redirect(url_for('dashboard'))
+
+@app.route('/stats/<int:link_id>')
+@loginREQUIRED
+def link_stats(link_id):
+    link = Link.query.filter_by(ID=linkId, userId=currentUser.ID).FirstOr404()
+    return Render_template_string('''
+                <!-- Link Stats -->
+                ''', title='Link Stats- Synlink', link=link)
+
+if __name__ == '__main__':
+    app.run(debug=True)

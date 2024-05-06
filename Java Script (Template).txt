@@ -1,0 +1,11 @@
+$(document).ready(function () {
+    'use strict';
+    var $navbarSupportedContent = $('.navbar-collapse');
+    $(window).on('resize', function () {
+        if ($(this).width() < 768) {
+            $navbarSupportedContent.addClass('show');
+        } else {
+            $navbarSupportedContent.removeClass('show');
+        }
+    });
+});
